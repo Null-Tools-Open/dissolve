@@ -1,0 +1,45 @@
+{
+  "name": "dissolve",
+  "version": "1.0.0",
+  "description": "Dissolve is a tool for compressing images and videos.",
+  "homepage": "https://github.com/null-tools/dissolve",
+  "main": "src/api.js",
+  "types": "src/api.d.ts",
+  "scripts": {
+    "multi-thread-demo": "node examples/multi-thread-demo.js",
+    "build": "node scripts/build.js",
+    "test": "jest"
+  },
+  "keywords": [
+    "compression",
+    "image-optimization",
+    "video-compression",
+    "file-packer",
+    "media-compression",
+    "multi-threading",
+    "worker-threads",
+    "ultrafast",
+    "batch-processing",
+    "sharp",
+    "ffmpeg"
+  ],
+  "author": "ImpulseDev",
+  "license": "MIT",
+  "dependencies": {
+    "@impulsedev/shcl": "^1.0.2",
+    "ffmpeg": "^0.0.4",
+    "filesize": "^10.1.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "glob": "^10.3.10",
+    "mime-types": "^2.1.35",
+    "progress": "^2.0.3",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
