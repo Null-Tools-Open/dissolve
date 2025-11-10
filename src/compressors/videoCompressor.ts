@@ -1,11 +1,96 @@
-const path = require('path');
-const fs = require('fs').promises;
-const { FileUtils } = require('../utils/fileUtils');
-const { spawnSync } = require('child_process');
-const ffmpeg = require('fluent-ffmpeg');
+import path from 'path';
+import { promises as fs, existsSync, readdirSync } from 'fs';
+import { spawnSync } from 'child_process';
+import ffmpeg, { FfmpegCommand, FfprobeData } from 'fluent-ffmpeg';
+import os from 'os';
+
+interface VideoCompressionMetadata {
+  duration?: number;
+  bit_rate?: string;
+  size?: number;
+}
+
+interface VideoCompressionStream {
+  codec_name?: string;
+  width?: number;
+  height?: number;
+}
+
+interface VideoCompressionFfprobeData extends FfprobeData {
+  format?: VideoCompressionMetadata;
+  streams?: VideoCompressionStream[];
+}
+
+interface VideoCompressorOptions {
+  skip?: boolean;
+  speedOptimized?: boolean;
+  skipOptimizations?: boolean;
+  ffmpegPath?: string | null;
+  ffprobePath?: string | null;
+  isLimited?: boolean;
+  hasFFprobe?: boolean;
+  codec?: string;
+  bitrate?: string;
+  width?: number;
+  height?: number;
+  quality?: number | string;
+  threads?: number | string;
+  output?: string;
+  format?: string;
+  targetSize?: string | number;
+  forceThreads?: boolean;
+  ultrafast?: boolean;
+}
+
+interface VideoCompressionResult {
+  inputFile: string;
+  outputFile: string;
+  originalSize: number;
+  compressedSize: number;
+  reduction: string;
+  metadata: {
+    duration?: number;
+    bitrate?: string;
+    size?: number;
+    codec?: string;
+    resolution?: string;
+  };
+}
+
+interface DetectionResult {
+  ffmpegPath: string | null;
+  ffprobePath: string | null;
+  isLimited: boolean;
+  hasFFprobe: boolean;
+  detectionSource: string;
+}
+
+interface ExtremeStrategy {
+  codec: string;
+  scale: number;
+  bitrate?: string;
+  preset?: string;
+  crf?: number;
+}
+
+interface ExtremeStrategyResult extends ExtremeStrategy {
+  tempPath: string | null;
+  size: number;
+  index?: number;
+}
 
 class VideoCompressor {
-  constructor(options = {}) {
+  private static _cachedPaths: DetectionResult | null = null;
+  [key: string]: any;
+  private options: VideoCompressorOptions;
+  private speedOptimized: boolean;
+  private skipOptimizations: boolean;
+  private ffmpegPath: string | null;
+  private ffprobePath: string | null;
+  private isFFmpegLimited: boolean;
+  private hasFFprobe: boolean;
+
+  constructor(options: VideoCompressorOptions = {}) {
     this.options = options;
     this.speedOptimized = options.speedOptimized || false;
     this.skipOptimizations = options.skipOptimizations || false;
@@ -15,12 +100,17 @@ class VideoCompressor {
     this.hasFFprobe = options.hasFFprobe !== undefined ? options.hasFFprobe : false;
     
     if (!this.ffmpegPath) {
+
       this.setupFFmpegPaths();
+
     } else {
+
       ffmpeg.setFfmpegPath(this.ffmpegPath);
+
       if (this.ffprobePath && this.hasFFprobe) {
         ffmpeg.setFfprobePath(this.ffprobePath);
       }
+      
       if (!this.options.skip) {
         console.log(`FFmpeg configured via options: ${this.ffmpegPath}`);
         if (this.isFFmpegLimited) {
@@ -30,13 +120,15 @@ class VideoCompressor {
     }
   }
 
-  setupFFmpegPaths() {
+  private setupFFmpegPaths(): void {
     try {
-      const currentFFmpegPath = require('fluent-ffmpeg')().options.ffmpeg_path || null;
+      
+      const currentFFmpegPath = (ffmpeg() as FfmpegCommand & { options?: Record<string, any> }).options?.ffmpeg_path || null;
+      
       if (currentFFmpegPath) {
         this.ffmpegPath = currentFFmpegPath;
         try {
-          const currentFFprobePath = require('fluent-ffmpeg')().options.ffprobe_path || null;
+          const currentFFprobePath = (ffmpeg() as FfmpegCommand & { options?: Record<string, any> }).options?.ffprobe_path || null;
           this.ffprobePath = currentFFprobePath;
           this.hasFFprobe = !!currentFFprobePath;
         } catch (e) {
@@ -54,6 +146,7 @@ class VideoCompressor {
         return;
       }
     } catch (e) {
+      // just ignore the error
     }
 
     try {
@@ -85,7 +178,7 @@ class VideoCompressor {
     }
   }
 
-  async compress(inputFile, options = {}) {
+  async compress(inputFile: string, options: VideoCompressorOptions = {}): Promise<VideoCompressionResult> {
     this.setupFFmpegPaths();
     const originalStats = await fs.stat(inputFile);
     const originalSize = originalStats.size;
@@ -124,8 +217,13 @@ class VideoCompressor {
     };
   }
 
-  createFFmpegCommand(inputFile, outputPath, metadata, options) {
-    let command = require('fluent-ffmpeg')(inputFile);
+  private createFFmpegCommand(
+    inputFile: string,
+    outputPath: string,
+    metadata: VideoCompressionFfprobeData,
+    options: VideoCompressorOptions
+  ): FfmpegCommand {
+    let command = ffmpeg(inputFile);
     const codec = options.codec || 'h264';
     command = command.videoCodec(this.getVideoCodec(codec));
     command = command.audioCodec(this.getAudioCodec());
@@ -133,22 +231,37 @@ class VideoCompressor {
     if (options.bitrate) {
       command = command.videoBitrate(options.bitrate);
     } else {
-      let quality = options.quality || 'medium';
-      
-      if (typeof quality === 'number' || (typeof quality === 'string' && !isNaN(quality))) {
-        const numQuality = parseInt(quality);
-        if (numQuality >= 90) quality = 'high';
-        else if (numQuality >= 75) quality = 'slow';
-        else if (numQuality >= 60) quality = 'medium';
-        else if (numQuality >= 40) quality = 'fast';
-        else quality = 'ultrafast';
+      const qualityOption = options.quality;
+      let qualitySetting = 'medium';
+
+      if (typeof qualityOption === 'number') {
+        const numQuality = qualityOption;
+        if (numQuality >= 90) qualitySetting = 'high';
+        else if (numQuality >= 75) qualitySetting = 'slow';
+        else if (numQuality >= 60) qualitySetting = 'medium';
+        else if (numQuality >= 40) qualitySetting = 'fast';
+        else qualitySetting = 'ultrafast';
+
+      } else if (typeof qualityOption === 'string') {
+
+        const numQuality = parseInt(qualityOption, 10);
+        
+        if (!Number.isNaN(numQuality)) {
+          if (numQuality >= 90) qualitySetting = 'high';
+          else if (numQuality >= 75) qualitySetting = 'slow';
+          else if (numQuality >= 60) qualitySetting = 'medium';
+          else if (numQuality >= 40) qualitySetting = 'fast';
+          else qualitySetting = 'ultrafast';
+        } else {
+          qualitySetting = qualityOption;
+        }
       }
-      
-      if (this.speedOptimized && !options.quality) {
-        quality = 'ultrafast';
+
+      if (this.speedOptimized && qualityOption === undefined) {
+        qualitySetting = 'ultrafast';
       }
-      
-      command = this.applyQualitySettings(command, quality, codec);
+
+      command = this.applyQualitySettings(command, qualitySetting, codec);
     }
     
     if (options.width && options.height) {
@@ -171,8 +284,14 @@ class VideoCompressor {
       let preset = 'fast';
       if (this.speedOptimized) {
         preset = 'ultrafast';
-      } else if (options.quality && parseInt(options.quality) >= 90) {
-        preset = 'slow';
+      } else if (options.quality !== undefined) {
+        const numericQuality =
+          typeof options.quality === 'number'
+            ? options.quality
+            : parseInt(options.quality, 10);
+        if (!Number.isNaN(numericQuality) && numericQuality >= 90) {
+          preset = 'slow';
+        }
       }
       command = command.addOption('-preset', preset);
     } else if (this.speedOptimized) {
@@ -199,7 +318,7 @@ class VideoCompressor {
     return command.output(outputPath);
   }
 
-  applyQualitySettings(command, quality, codec) {
+  private applyQualitySettings(command: FfmpegCommand, quality: string, codec: string): FfmpegCommand {
     if (this.isFFmpegLimited) {
       const bitrates = {
         'ultrafast': '800k',
@@ -242,7 +361,7 @@ class VideoCompressor {
     return command;
   }
 
-  getVideoCodec(codec) {
+  private getVideoCodec(codec: string): string {
     if (this.isFFmpegLimited) {
       const limitedCodecMap = {
         'h264': 'h264_nvenc',
@@ -265,11 +384,11 @@ class VideoCompressor {
     return codecMap[codec.toLowerCase()] || 'libx264';
   }
 
-  getAudioCodec() {
+  private getAudioCodec(): string {
     return this.isFFmpegLimited ? 'aac_mf' : 'aac';
   }
 
-  async getVideoMetadata(inputFile) {
+  private async getVideoMetadata(inputFile: string): Promise<VideoCompressionFfprobeData> {
     this.setupFFmpegPaths();
     
     if (!this.hasFFprobe) {
@@ -287,7 +406,7 @@ class VideoCompressor {
       };
     }
 
-    return new Promise((resolve, reject) => {
+    return new Promise<VideoCompressionFfprobeData>((resolve, reject) => {
       ffmpeg.ffprobe(inputFile, (err, metadata) => {
         if (err) {
           reject(new Error(`FFmpeg error: ${err.message}`));
@@ -298,7 +417,14 @@ class VideoCompressor {
     });
   }
 
-  async extremeCompressionStrategy(inputFile, outputPath, metadata, options, originalSize, targetSize) {
+  private async extremeCompressionStrategy(
+    inputFile: string,
+    outputPath: string,
+    metadata: VideoCompressionFfprobeData,
+    options: VideoCompressorOptions,
+    originalSize: number,
+    targetSize: number
+  ): Promise<string> {
     if (!this.options.skip) {
       console.log('Extreme video compression mode: testing strategies sequentially...');
     }
@@ -312,7 +438,7 @@ class VideoCompressor {
       return await this.parallelExtremeCompressionStrategy(inputFile, outputPath, metadata, options, originalSize, targetSize);
     }
     
-    let strategies = [];
+    let strategies: ExtremeStrategy[] = [];
     
     if (this.isFFmpegLimited) {
       const resolutions = isLargeVideo ? [0.5, 0.3, 0.2] : [1.0, 0.7, 0.5];
@@ -347,7 +473,7 @@ class VideoCompressor {
       console.log(`Large video detected (${width}x${height}) - using conservative settings`);
     }
     
-    let bestResult = null;
+    let bestResult: ExtremeStrategyResult | null = null;
     const baseName = path.basename(inputFile, path.extname(inputFile));
     
     for (let i = 0; i < strategies.length; i++) {
@@ -365,14 +491,14 @@ class VideoCompressor {
       
       let optimalThreads;
       if (totalPixels > 4000000) {
-        optimalThreads = Math.min(4, require('os').cpus().length);
+        optimalThreads = Math.min(4, os.cpus().length);
       } else if (totalPixels > 2000000) {
-        optimalThreads = Math.min(2, require('os').cpus().length);
+        optimalThreads = Math.min(2, os.cpus().length);
       } else {
         optimalThreads = 1;
       }
       
-      let command = require('fluent-ffmpeg')(inputFile)
+      let command = ffmpeg(inputFile)
         .videoCodec(this.getVideoCodec(s.codec))
         .audioCodec(this.getAudioCodec())
         .addOption('-threads', optimalThreads.toString())
@@ -405,7 +531,7 @@ class VideoCompressor {
       try {
         await this.executeCompression(command);
         const stats = await fs.stat(tempOut);
-        const result = { ...s, tempPath: tempOut, size: stats.size };
+        const result: ExtremeStrategyResult = { ...s, tempPath: tempOut, size: stats.size };
         
         if (!this.options.skip) {
           console.log(`Result: ${(stats.size / (1024*1024)).toFixed(2)}MB (target: ${(targetSize / (1024*1024)).toFixed(2)}MB)`);
@@ -422,9 +548,8 @@ class VideoCompressor {
           break;
         } else {
           try { await fs.unlink(tempOut); } catch {}
-          if (!bestResult || stats.size < bestResult.size) {
-            bestResult = result;
-            bestResult.tempPath = null;
+        if (!bestResult || stats.size < bestResult.size) {
+          bestResult = { ...result, tempPath: null };
           }
         }
       } catch (e) {
@@ -440,10 +565,10 @@ class VideoCompressor {
       throw new Error('No compression strategy succeeded');
     }
     
-    const finalExt = this.getExtensionForFormat('mp4'); // Always use MP4 for SteelSeries compatibility
+    const finalExt = this.getExtensionForFormat('mp4');
     const finalOutputPath = outputPath.replace(/\.[^.]+$/, finalExt);
     
-    if (bestResult.tempPath && require('fs').existsSync(bestResult.tempPath)) {
+    if (bestResult.tempPath && existsSync(bestResult.tempPath)) {
       await fs.rename(bestResult.tempPath, finalOutputPath);
     } else {
       if (!this.options.skip) {
@@ -456,14 +581,14 @@ class VideoCompressor {
       
       let optimalThreads;
       if (totalPixels > 4000000) {
-        optimalThreads = Math.min(4, require('os').cpus().length);
+        optimalThreads = Math.min(4, os.cpus().length);
       } else if (totalPixels > 2000000) {
-        optimalThreads = Math.min(2, require('os').cpus().length);
+        optimalThreads = Math.min(2, os.cpus().length);
       } else {
         optimalThreads = 1;
       }
       
-      let command = require('fluent-ffmpeg')(inputFile)
+      let command = ffmpeg(inputFile)
         .videoCodec(this.getVideoCodec(bestResult.codec))
         .audioCodec(this.getAudioCodec())
         .addOption('-threads', optimalThreads.toString())
@@ -479,8 +604,10 @@ class VideoCompressor {
       if (this.isFFmpegLimited || bestResult.bitrate) {
         command = command.videoBitrate(bestResult.bitrate || '1200k');
       } else {
-        command = command.addOption('-crf', bestResult.crf.toString());
-        if (!bestResult.codec.includes('nvenc')) {
+        if (bestResult.crf !== undefined) {
+          command = command.addOption('-crf', bestResult.crf.toString());
+        }
+        if (bestResult.preset && !bestResult.codec.includes('nvenc')) {
           command = command.addOption('-preset', bestResult.preset);
         }
       }
@@ -507,7 +634,14 @@ class VideoCompressor {
     return finalOutputPath;
   }
 
-  async parallelExtremeCompressionStrategy(inputFile, outputPath, metadata, options, originalSize, targetSize) {
+  private async parallelExtremeCompressionStrategy(
+    inputFile: string,
+    outputPath: string,
+    metadata: VideoCompressionFfprobeData,
+    options: VideoCompressorOptions,
+    originalSize: number,
+    targetSize: number
+  ): Promise<string> {
     if (!this.options.skip) {
       console.log('Extreme video compression mode: parallel strategies (controlled batches)...');
     }
@@ -517,7 +651,7 @@ class VideoCompressor {
     const height = metadata.streams?.[0]?.height || 1080;
     const isLargeVideo = width > 2560 || height > 1440;
     
-    let strategies = [];
+    let strategies: ExtremeStrategy[] = [];
     
     if (this.isFFmpegLimited) {
       const resolutions = isLargeVideo ? [0.5, 0.3, 0.2] : [1.0, 0.7, 0.5];
@@ -548,17 +682,19 @@ class VideoCompressor {
       }
     }
     
-    const maxConcurrent = isLargeVideo ? Math.min(2, require('os').cpus().length) : Math.min(3, require('os').cpus().length); 
+    const maxConcurrent = isLargeVideo ? Math.min(2, os.cpus().length) : Math.min(3, os.cpus().length); 
     const batchSize = Math.ceil(strategies.length / maxConcurrent);
     
     if (!this.options.skip) {
       console.log(`Testing ${strategies.length} strategies in ${Math.ceil(strategies.length / batchSize)} batches of max ${batchSize} strategies`);
+      
       if (isLargeVideo) {
         console.log(`Large video detected (${width}x${height}) - using conservative settings`);
       }
+
     }
     
-    let bestResult = null;
+    let bestResult: ExtremeStrategyResult | null = null;
     let batchIndex = 0;
     
     for (let i = 0; i < strategies.length; i += batchSize) {
@@ -579,15 +715,17 @@ class VideoCompressor {
           const totalPixels = scaledWidth * scaledHeight;
           
           let optimalThreads;
+
           if (totalPixels > 4000000) {
-            optimalThreads = Math.min(4, require('os').cpus().length);
+            
+            optimalThreads = Math.min(4, os.cpus().length);
           } else if (totalPixels > 2000000) {
-            optimalThreads = Math.min(2, require('os').cpus().length);
+            optimalThreads = Math.min(2, os.cpus().length);
           } else {
             optimalThreads = 1;
           }
           
-          let command = require('fluent-ffmpeg')(inputFile)
+          let command = ffmpeg(inputFile)
             .videoCodec(this.getVideoCodec(strategy.codec))
             .audioCodec(this.getAudioCodec())
             .addOption('-threads', optimalThreads.toString())
@@ -660,8 +798,7 @@ class VideoCompressor {
         } else {
           try { await fs.unlink(result.tempPath); } catch {}
           if (!bestResult || result.size < bestResult.size) {
-            bestResult = result;
-            bestResult.tempPath = null;
+            bestResult = { ...result, tempPath: null };
           }
         }
       }
@@ -670,7 +807,7 @@ class VideoCompressor {
         break;
       }
       
-      await new Promise(resolve => setTimeout(resolve, isLargeVideo ? 1000 : 500));
+      await new Promise<void>(resolve => setTimeout(resolve, isLargeVideo ? 1000 : 500));
     }
     
     if (!bestResult) {
@@ -680,7 +817,7 @@ class VideoCompressor {
     const finalExt = this.getExtensionForFormat('mp4');
     const finalOutputPath = outputPath.replace(/\.[^.]+$/, finalExt);
     
-    if (bestResult.tempPath && require('fs').existsSync(bestResult.tempPath)) {
+    if (bestResult.tempPath && existsSync(bestResult.tempPath)) {
       await fs.rename(bestResult.tempPath, finalOutputPath);
     } else {
       if (!this.options.skip) {
@@ -693,14 +830,14 @@ class VideoCompressor {
       
       let optimalThreads;
       if (totalPixels > 4000000) {
-        optimalThreads = Math.min(4, require('os').cpus().length);
+        optimalThreads = Math.min(4, os.cpus().length);
       } else if (totalPixels > 2000000) {
-        optimalThreads = Math.min(2, require('os').cpus().length);
+        optimalThreads = Math.min(2, os.cpus().length);
       } else {
         optimalThreads = 1;
       }
       
-      let command = require('fluent-ffmpeg')(inputFile)
+      let command = ffmpeg(inputFile)
         .videoCodec(this.getVideoCodec(bestResult.codec))
         .audioCodec(this.getAudioCodec())
         .addOption('-threads', optimalThreads.toString())
@@ -744,13 +881,20 @@ class VideoCompressor {
     return finalOutputPath;
   }
 
-  async standardCompressionStrategy(inputFile, outputPath, metadata, options, originalSize, targetSize) {
+  private async standardCompressionStrategy(
+    inputFile: string,
+    outputPath: string,
+    metadata: VideoCompressionFfprobeData,
+    options: VideoCompressorOptions,
+    originalSize: number,
+    targetSize: number
+  ): Promise<string> {
     const duration = metadata.format?.duration || 60;
     const audioBitrate = 96;
     const overheadFactor = 0.85;
     const targetBitrate = Math.floor(((targetSize * 8 * overheadFactor) / duration - audioBitrate * 1024) / 1024);
     const finalBitrate = Math.max(100, Math.min(targetBitrate, 10000));
-    let command = require('fluent-ffmpeg')(inputFile)
+    let command = ffmpeg(inputFile)
       .videoCodec(this.isFFmpegLimited ? 'h264_nvenc' : 'libx264')
       .audioCodec(this.getAudioCodec())
       .videoBitrate(`${finalBitrate}k`)
@@ -770,8 +914,8 @@ class VideoCompressor {
     return outputPath;
   }
 
-  async executeCompression(command) {
-    return new Promise((resolve, reject) => {
+  private async executeCompression(command: FfmpegCommand): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       let lastPercent = 0;
       command
         .on('progress', (progress) => {
@@ -782,7 +926,7 @@ class VideoCompressor {
         })
         .on('end', () => {
           process.stdout.write('\r  Progress: 100%\n');
-          resolve();
+          resolve(undefined);
         })
         .on('error', (err, stdout, stderr) => {
           console.error('FFmpeg error:', err.message);
@@ -794,7 +938,7 @@ class VideoCompressor {
     });
   }
 
-  getOutputFormat(outputPath) {
+  private getOutputFormat(outputPath: string): string {
     const ext = path.extname(outputPath).toLowerCase();
     switch (ext) {
       case '.mp4': return 'mp4';
@@ -806,7 +950,7 @@ class VideoCompressor {
     }
   }
 
-  getExtensionForFormat(format) {
+  private getExtensionForFormat(format: string): string {
     switch (format) {
       case 'mp4': return '.mp4';
       case 'webm': return '.webm';
@@ -817,7 +961,7 @@ class VideoCompressor {
     }
   }
 
-  generateOutputPath(inputFile, options) {
+  private generateOutputPath(inputFile: string, options: VideoCompressorOptions): string {
     if (options.output) {
       if (options.output.endsWith('/') || options.output.endsWith('\\')) {
         const basename = path.basename(inputFile, path.extname(inputFile));
@@ -836,7 +980,7 @@ class VideoCompressor {
     }
   }
 
-  getOutputExtension(inputFile, formatOption) {
+  private getOutputExtension(inputFile: string, formatOption?: string): string {
     if (formatOption && formatOption !== 'auto') {
       switch (formatOption.toLowerCase()) {
         case 'mp4':
@@ -867,7 +1011,7 @@ class VideoCompressor {
     let isLimited = false;
     let detectionSource = '';
 
-    const validateFFmpegPath = (ffmpegPath, ffprobePath) => {
+    const validateFFmpegPath = (ffmpegPath: string, ffprobePath: string | null) => {
       try {
         const ffmpegTest = spawnSync(ffmpegPath, ['-version'], { 
           stdio: 'pipe', 
@@ -885,8 +1029,7 @@ class VideoCompressor {
           let hasFFprobe = false;
           let actualFFprobePath = ffprobePath;
           try {
-            const fsSync = require('fs');
-            if (fsSync.existsSync(ffprobePath)) {
+            if (ffprobePath && existsSync(ffprobePath)) {
               const ffprobeTest = spawnSync(ffprobePath, ['-version'], { 
                 stdio: 'pipe', 
                 timeout: 5000,
@@ -938,10 +1081,8 @@ class VideoCompressor {
     };
 
     const checkCommonDirectories = () => {
-      const fsSync = require('fs');
       const exeSuffix = process.platform === 'win32' ? '.exe' : '';
-      
-      let commonDirs = [];
+      let commonDirs: string[] = [];
       
       if (process.platform === 'win32') {
         commonDirs = [
@@ -974,13 +1115,13 @@ class VideoCompressor {
         ];
       }
 
-      const expandedDirs = [];
+      const expandedDirs: string[] = [];
       for (const dir of commonDirs) {
         if (dir.includes('*')) {
           try {
             const parentDir = path.dirname(dir);
             const pattern = path.basename(dir);
-            const entries = fsSync.readdirSync(parentDir, { withFileTypes: true });
+            const entries = readdirSync(parentDir, { withFileTypes: true });
             for (const entry of entries) {
               if (entry.isDirectory() && entry.name.match(pattern.replace('*', '.*'))) {
                 expandedDirs.push(path.join(parentDir, entry.name));
@@ -998,7 +1139,7 @@ class VideoCompressor {
         const ffprobePath = path.join(dir, `ffprobe${exeSuffix}`);
         
         try {
-          if (fsSync.existsSync(ffmpegPath) && fsSync.existsSync(ffprobePath)) {
+          if (existsSync(ffmpegPath) && existsSync(ffprobePath)) {
             const result = validateFFmpegPath(ffmpegPath, ffprobePath);
             if (result.valid) {
               return {
@@ -1102,7 +1243,7 @@ class VideoCompressor {
       return null;
     };
 
-    const strategies = [
+    const strategies: Array<{ name: string; func: () => { ffmpegPath: string | null; ffprobePath: string | null; isLimited: boolean; hasFFprobe: boolean; source: string } | null }> = [
       { name: 'PATH', func: checkSystemPath },
       { name: 'CommonDirs', func: checkCommonDirectories },
       { name: 'Registry', func: checkWindowsRegistry },
@@ -1121,20 +1262,20 @@ class VideoCompressor {
     }
 
     const hasFFprobe = ffprobePath !== null;
-    const finalResult = { ffmpegPath, ffprobePath, isLimited, hasFFprobe, detectionSource };
+    const finalResult: DetectionResult = { ffmpegPath, ffprobePath, isLimited, hasFFprobe, detectionSource };
     VideoCompressor._cachedPaths = finalResult;
     setTimeout(() => {
-      delete VideoCompressor._cachedPaths;
+      VideoCompressor._cachedPaths = null;
     }, 5 * 60 * 1000);
 
     return finalResult;
   }
 
-  static clearDetectionCache() {
-    delete VideoCompressor._cachedPaths;
+  static clearDetectionCache(): void {
+    VideoCompressor._cachedPaths = null;
   }
 
-  parseTargetSize(targetSize) {
+  private parseTargetSize(targetSize: string | number): number {
     const units = {
       'B': 1,
       'KB': 1024,
@@ -1155,4 +1296,4 @@ class VideoCompressor {
   }
 }
 
-module.exports = { VideoCompressor };
+export { VideoCompressor };

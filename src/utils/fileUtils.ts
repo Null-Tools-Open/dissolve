@@ -1,11 +1,21 @@
-const fs = require('fs').promises;
-const path = require('path');
-const { createReadStream, createWriteStream } = require('fs');
-const { pipeline } = require('stream').promises;
+import { promises as fsPromises, createReadStream, createWriteStream, Stats } from 'fs';
+import path from 'path';
+import { pipeline } from 'stream/promises';
 
-class FileUtils {
+type ProgressCallback = (copiedBytes: number, totalBytes: number) => void;
 
-  static async exists(filePath) {
+interface DiskSpaceInfo {
+  total: number;
+  free: number;
+  used: number;
+}
+
+type ChunkProcessor = (chunk: Buffer) => void | Promise<void>;
+
+const fs = fsPromises;
+
+export class FileUtils {
+  static async exists(filePath: string): Promise<boolean> {
     try {
       await fs.access(filePath);
       return true;
@@ -14,31 +24,31 @@ class FileUtils {
     }
   }
 
-  static async getFileSize(filePath) {
+  static async getFileSize(filePath: string): Promise<number> {
     const stats = await fs.stat(filePath);
     return stats.size;
   }
 
-  static async ensureDir(dirPath) {
+  static async ensureDir(dirPath: string): Promise<void> {
     try {
       await fs.mkdir(dirPath, { recursive: true });
-    } catch (error) {
+    } catch (error: any) {
       if (error.code !== 'EEXIST') {
         throw error;
       }
     }
   }
 
-  static async copyFile(source, destination, onProgress) {
+  static async copyFile(source: string, destination: string, onProgress?: ProgressCallback): Promise<void> {
     await this.ensureDir(path.dirname(destination));
-    
+
     const sourceSize = await this.getFileSize(source);
     let copiedBytes = 0;
 
     const sourceStream = createReadStream(source);
     const destStream = createWriteStream(destination);
 
-    sourceStream.on('data', (chunk) => {
+    sourceStream.on('data', (chunk: Buffer) => {
       copiedBytes += chunk.length;
       if (onProgress) {
         onProgress(copiedBytes, sourceSize);
@@ -48,31 +58,31 @@ class FileUtils {
     await pipeline(sourceStream, destStream);
   }
 
-  static async moveFile(source, destination) {
+  static async moveFile(source: string, destination: string): Promise<void> {
     await this.ensureDir(path.dirname(destination));
     await fs.rename(source, destination);
   }
 
-  static async deleteFile(filePath) {
+  static async deleteFile(filePath: string): Promise<void> {
     try {
       await fs.unlink(filePath);
-    } catch (error) {
+    } catch (error: any) {
       if (error.code !== 'ENOENT') {
         throw error;
       }
     }
   }
 
-  static getExtension(filePath) {
+  static getExtension(filePath: string): string {
     return path.extname(filePath).toLowerCase();
   }
 
-  static getBaseName(filePath) {
+  static getBaseName(filePath: string): string {
     return path.basename(filePath, path.extname(filePath));
   }
 
-  static async getUniqueFileName(filePath) {
-    if (!await this.exists(filePath)) {
+  static async getUniqueFileName(filePath: string): Promise<string> {
+    if (!(await this.exists(filePath))) {
       return filePath;
     }
 
@@ -81,8 +91,8 @@ class FileUtils {
     const base = path.basename(filePath, ext);
 
     let counter = 1;
-    let newPath;
-    
+    let newPath: string;
+
     do {
       newPath = path.join(dir, `${base}_${counter}${ext}`);
       counter++;
@@ -91,22 +101,22 @@ class FileUtils {
     return newPath;
   }
 
-  static formatFileSize(bytes) {
+  static formatFileSize(bytes: number): string {
     if (bytes === 0) return '0 B';
-    
+
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
   }
 
-  static getCompressionRatio(originalSize, compressedSize) {
-    if (originalSize === 0) return 0;
+  static getCompressionRatio(originalSize: number, compressedSize: number): string {
+    if (originalSize === 0) return '0.00';
     return ((originalSize - compressedSize) / originalSize * 100).toFixed(2);
   }
 
-  static validatePath(filePath) {
+  static validatePath(filePath: string): true {
     const invalidChars = /[<>:"|?*]/;
     if (invalidChars.test(filePath)) {
       throw new Error(`Invalid characters in file path: ${filePath}`);
@@ -119,7 +129,7 @@ class FileUtils {
     return true;
   }
 
-  static getSafeFileName(fileName) {
+  static getSafeFileName(fileName: string): string {
     return fileName
       .replace(/[<>:"|?*]/g, '_')
       .replace(/\s+/g, '_')
@@ -127,21 +137,30 @@ class FileUtils {
       .trim();
   }
 
-  static getRelativePath(from, to) {
+  static getRelativePath(from: string, to: string): string {
     return path.relative(from, to);
   }
 
-  static isAbsolute(filePath) {
+  static isAbsolute(filePath: string): boolean {
     return path.isAbsolute(filePath);
   }
 
-  static normalizePath(filePath) {
+  static normalizePath(filePath: string): string {
     return path.normalize(filePath);
   }
 
-  static async getFileStats(filePath) {
-    const stats = await fs.stat(filePath);
-    
+  static async getFileStats(filePath: string): Promise<{
+    size: number;
+    created: Date;
+    modified: Date;
+    accessed: Date;
+    isFile: boolean;
+    isDirectory: boolean;
+    permissions: number;
+    formattedSize: string;
+  }> {
+    const stats: Stats = await fs.stat(filePath);
+
     return {
       size: stats.size,
       created: stats.birthtime,
@@ -154,18 +173,23 @@ class FileUtils {
     };
   }
 
-  static async readFileInChunks(filePath, chunkSize = 64 * 1024, processor) {
+  static async readFileInChunks(filePath: string, chunkSize: number = 64 * 1024, processor: ChunkProcessor): Promise<void> {
     const stream = createReadStream(filePath, { highWaterMark: chunkSize });
-    
+
     for await (const chunk of stream) {
-      await processor(chunk);
+      await processor(chunk as Buffer);
     }
   }
 
-  static async getDiskSpace(dirPath) {
+  static async getDiskSpace(dirPath: string): Promise<DiskSpaceInfo> {
     try {
-      const stats = await fs.statvfs(dirPath);
-      
+      const fsAny = fs as unknown as { statvfs?: (path: string) => Promise<{ f_blocks: number; f_frsize: number; f_bavail: number }> };
+      if (!fsAny.statvfs) {
+        throw new Error('statvfs not available');
+      }
+
+      const stats = await fsAny.statvfs(dirPath);
+
       return {
         total: stats.f_blocks * stats.f_frsize,
         free: stats.f_bavail * stats.f_frsize,
@@ -180,5 +204,3 @@ class FileUtils {
     }
   }
 }
-
-module.exports = { FileUtils };

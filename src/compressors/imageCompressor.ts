@@ -2,16 +2,27 @@ const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
 
+type CompressionOptions = Record<string, any>;
+type CompressionResult = Record<string, any>;
+
 class ImageCompressor {
-  constructor(options = {}) {
+  [key: string]: any;
+  private options: CompressionOptions;
+  private speedOptimized: boolean;
+  private skipOptimizations: boolean;
+
+  constructor(options: CompressionOptions = {}) {
     this.options = options;
     this.speedOptimized = options.speedOptimized || false;
     this.skipOptimizations = options.skipOptimizations || false;
   }
 
-  async compress(inputFile, options = {}) {
+  async compress(inputFile: string | Buffer, options: CompressionOptions = {}): Promise<CompressionResult> {
     const mergedOptions = { ...this.options, ...options };
-    let originalSize, outputPath, sharpInstance, metadata;
+    let originalSize: number;
+    let outputPath: string | undefined;
+    let sharpInstance: any;
+    let metadata: any;
 
     if (Buffer.isBuffer(inputFile)) {
       originalSize = inputFile.length;
@@ -374,7 +385,7 @@ class ImageCompressor {
 
     const successful = results
       .filter(r => r.status === 'fulfilled' && r.value.success && r.value.size <= targetSize)
-      .map(r => r.value)
+      .map(r => (r as PromiseFulfilledResult<any>).value)
       .sort((a, b) => a.size - b.size);
 
     if (successful.length > 0) {
@@ -760,4 +771,4 @@ class ImageCompressor {
   }
 }
 
-module.exports = { ImageCompressor };
+export { ImageCompressor };

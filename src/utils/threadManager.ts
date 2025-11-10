@@ -3,8 +3,16 @@ const os = require('os');
 const path = require('path');
 const shcl = require('@impulsedev/shcl');
 
+type ThreadManagerOptions = Record<string, any>;
+
 class ThreadManager {
-  constructor(options = {}) {
+  [key: string]: any;
+  private options: ThreadManagerOptions;
+  private workers: any[];
+  private isQuiet: boolean;
+  private threadCount!: number;
+
+  constructor(options: ThreadManagerOptions = {}) {
     this.options = options;
     this.workers = [];
     this.isQuiet = options.skip || false;
@@ -69,7 +77,7 @@ class ThreadManager {
     return chunks;
   }
   
-  async processFiles(files, options = {}) {
+  async processFiles(files: any[], options: ThreadManagerOptions = {}) {
     if (files.length === 0) {
       return { processed: 0, errors: [], totalSizeReduction: 0, files: [] };
     }
@@ -186,7 +194,7 @@ class ThreadManager {
                 }
               }
             });
-            resolve();
+            resolve(undefined);
             break;
             
           case 'worker_error':
@@ -207,7 +215,7 @@ class ThreadManager {
     });
   }
   
-  async processSingleThreaded(files, options) {
+  async processSingleThreaded(files: any[], options: ThreadManagerOptions): Promise<any> {
     const { ImageCompressor } = require('../compressors/imageCompressor');
     const mime = require('mime-types');
     
@@ -307,4 +315,4 @@ class ThreadManager {
   }
 }
 
-module.exports = { ThreadManager };
+export { ThreadManager };
