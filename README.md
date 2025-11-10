@@ -33,5 +33,5 @@ In short: we show you what you uploaded, even if what we store is smaller.
 
 ### Todo
 
-- Rewrite in TypeScript
+- Rewrite in TypeScript (DONE!)
 - Rewrite core in Rust for better performance and native efficiency
